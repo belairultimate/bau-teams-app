@@ -325,7 +325,7 @@ with tab_roster:
                 history_merged = rosters_df.merge(games_df, left_on="game_id", right_on="id")
                 history_merged['game_date'] = pd.to_datetime(history_merged['game_date'], errors='coerce')
                 
-                lifetime_games = history_merged.groupby('player_id').size().to_dict()
+                lifetime_games = history_merged.groupby('player_id')['game_id'].nunique().to_dict()
                 lifetime_days = history_merged.groupby('player_id')['game_date'].nunique().to_dict()
                 
                 current_year_df = history_merged[history_merged['game_date'].dt.year == current_year]
