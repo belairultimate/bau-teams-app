@@ -40,11 +40,45 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+@st.cache_data
 def load_data():
     response = supabase.table("players").select("*").execute()
     return pd.DataFrame(response.data)
 
 df = load_data()
+
+@st.cache_data(ttl=86400)
+def get_roster_stats():
+    """Fetches and calculates lifetime stats with a 24-hour cache and pagination."""
+    all_rosters = []
+    start_idx = 0
+    while True:
+        r_batch = supabase.table("game_rosters").select("game_id", "player_id").range(start_idx, start_idx + 999).execute()
+        all_rosters.extend(r_batch.data)
+        if len(r_batch.data) < 1000: 
+            break
+        start_idx += 1000
+    
+    g_resp = supabase.table("games").select("id", "game_date").execute()
+    
+    games_df = pd.DataFrame(g_resp.data)
+    rosters_df = pd.DataFrame(all_rosters)
+    
+    if games_df.empty or rosters_df.empty:
+        return {}, {}, {}
+        
+    history_merged = rosters_df.merge(games_df, left_on="game_id", right_on="id")
+    history_merged['game_date'] = pd.to_datetime(history_merged['game_date'], errors='coerce')
+    
+    current_year = datetime.date.today().year
+    
+    lifetime_games = history_merged.groupby('player_id')['game_id'].nunique().to_dict()
+    lifetime_days = history_merged.groupby('player_id')['game_date'].nunique().to_dict()
+    
+    current_year_df = history_merged[history_merged['game_date'].dt.year == current_year]
+    current_year_days = current_year_df.groupby('player_id')['game_date'].nunique().to_dict()
+    
+    return lifetime_games, lifetime_days, current_year_days
 
 # Build ID-to-Display-Name mapping dictionary (Prefers First + Last Name)
 player_map = {}
@@ -263,6 +297,7 @@ with tab_draft:
                     
                     st.success("🎉 Match logged! Active board wiped for next game.")
                     st.balloons()
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Database error writing records: {e}")
@@ -315,24 +350,9 @@ with tab_roster:
         df_display = df.copy()
         current_year = datetime.date.today().year
         
-        # Pull history aggregates seamlessly directly from relational mapping tables
+        # Pull history aggregates seamlessly using the cached pagination function
         try:
-            g_resp = supabase.table("games").select("id", "game_date").execute()
-            gr_resp = supabase.table("game_rosters").select("game_id", "player_id").execute()
-            games_df = pd.DataFrame(g_resp.data)
-            rosters_df = pd.DataFrame(gr_resp.data)
-            
-            if not games_df.empty and not rosters_df.empty:
-                history_merged = rosters_df.merge(games_df, left_on="game_id", right_on="id")
-                history_merged['game_date'] = pd.to_datetime(history_merged['game_date'], errors='coerce')
-                
-                lifetime_games = history_merged.groupby('player_id')['game_id'].nunique().to_dict()
-                lifetime_days = history_merged.groupby('player_id')['game_date'].nunique().to_dict()
-                
-                current_year_df = history_merged[history_merged['game_date'].dt.year == current_year]
-                current_year_days = current_year_df.groupby('player_id')['game_date'].nunique().to_dict()
-            else:
-                lifetime_games, lifetime_days, current_year_days = {}, {}, {}
+            lifetime_games, lifetime_days, current_year_days = get_roster_stats()
         except Exception as e:
             lifetime_games, lifetime_days, current_year_days = {}, {}, {}
         
@@ -452,7 +472,14 @@ with tab_edit:
             col1, col2 = st.columns(2)
             with col1: edit_first = st.text_input("First Name", value=get_str("First Name"))
             with col2: edit_last = st.text_input("Last Name", value=get_str("Last Name"))
-            edit_nick = st.text_input("Nickname", value=get_str("Nickname"))
+            
+            col_nick, col_stat = st.columns(2)
+            with col_nick: edit_nick = st.text_input("Nickname", value=get_str("Nickname"))
+            with col_stat:
+                status_options = ["Regular", "Occasional", "Inactive"]
+                curr_status = get_str("Status")
+                stat_idx = status_options.index(curr_status) if curr_status in status_options else 0
+                edit_status = st.selectbox("Status", status_options, index=stat_idx)
             
             col3, col4 = st.columns(2)
             with col3: edit_pairing = st.number_input("Pairing (1-30)", min_value=0, max_value=30, value=get_int("Pairing"))
@@ -497,12 +524,13 @@ with tab_edit:
                         "Pairing": edit_pairing, "Type": edit_type, "Both Throws": edit_both,
                         "College": edit_coll, "Club": edit_club, "Consistent Catch": edit_catch,
                         "Developing": edit_dev, "Fast": edit_fast, "Throw": edit_throw_range,
-                        "Notes": edit_notes
+                        "Notes": edit_notes, "Status": edit_status
                     }
                     
                     try:
                         supabase.table("players").update(payload).eq("id", selected_edit_id).execute()
                         st.success(f"🎉 Successfully updated {player_map.get(selected_edit_id)}!")
+                        st.cache_data.clear()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error updating database: {e}")
