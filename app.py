@@ -379,7 +379,7 @@ with tab_add:
         new_nick = st.text_input("Nickname (Optional)").strip()
         
         col3, col4 = st.columns(2)
-        with col3: new_pairing = st.number_input("Pairing (1-30)", min_value=1, max_value=30, value=15)
+        with col3: new_pairing = st.number_input("Pairing (1-30)", min_value=0, max_value=30, value=0)
         with col4: new_type = st.selectbox("Position", ["Cutter", "Handler", "Hybrid"])
         
         new_throw_range = st.selectbox("Throw Range", ["Short", "Medium", "Long"])
