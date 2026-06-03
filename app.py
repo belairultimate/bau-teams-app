@@ -30,7 +30,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# DATABASE CONNECTIONS & DATA LOADING
+# DATABASE CONNECTIONS & REAL-TIME FETCHES
 # ==========================================
 @st.cache_resource
 def init_connection():
@@ -40,7 +40,7 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-@st.cache_data
+# We clear cache on load to ensure multi-device synchronization
 def load_data():
     response = supabase.table("players").select("*").execute()
     return pd.DataFrame(response.data)
@@ -54,15 +54,25 @@ if not df.empty:
         p_id = row.get('id')
         if pd.isna(p_id):
             continue
-            
         fname = str(row.get('First Name', '')).strip() if pd.notna(row.get('First Name')) else ""
         lname = str(row.get('Last Name', '')).strip() if pd.notna(row.get('Last Name')) else ""
         nick = str(row.get('Nickname', '')).strip() if pd.notna(row.get('Nickname')) else ""
-        
         full_name = f"{fname} {lname}".strip()
-        
-        # Use Full Name if available, otherwise fallback to Nickname
         player_map[p_id] = full_name if full_name else nick
+
+# Helper function to grab a player's pairing value safely
+def get_pairing(pid):
+    if df.empty: return 99
+    match = df[df['id'] == pid]['Pairing'].values
+    return int(match[0]) if len(match) > 0 and pd.notna(match[0]) else 99
+
+# Pull active cloud-drafting state from Supabase
+def get_cloud_draft():
+    res = supabase.table("active_draft").select("*").execute()
+    return pd.DataFrame(res.data)
+
+active_draft_df = get_cloud_draft()
+attendees_ids = active_draft_df['player_id'].tolist() if not active_draft_df.empty else []
 
 st.title("🥏 BAU Management Hub")
 
@@ -74,39 +84,39 @@ tab_lineup, tab_draft, tab_history, tab_roster, tab_add = st.tabs([
     "➕ Add Player"
 ])
 
-if "assignments" not in st.session_state:
-    st.session_state.assignments = {}
-if "team_orders" not in st.session_state:
-    st.session_state.team_orders = {}
-
-# Helper function to grab a player's pairing value safely
-def get_pairing(pid):
-    if df.empty: return 99
-    match = df[df['id'] == pid]['Pairing'].values
-    return int(match[0]) if len(match) > 0 and pd.notna(match[0]) else 99
-
 # ==========================================
-# TAB 1: LINEUP / ATTENDANCE
+# TAB 1: SHARED ATTENDANCE / CHECK-IN
 # ==========================================
 with tab_lineup:
     st.header("Today's Attendance")
-    st.write("Select everyone who showed up to play today:")
+    st.write("Checking a player in adds them to the shared cloud draft room instantly.")
     
     sorted_ids = sorted(list(player_map.keys()), key=lambda x: player_map[x]) if player_map else []
-    attendees_ids = st.multiselect(
+    
+    # Pre-populate selections based on what's currently sitting in the cloud database
+    selected_attendees = st.multiselect(
         "Check-in Players", 
         options=sorted_ids, 
+        default=attendees_ids,
         format_func=lambda x: player_map.get(x, "Unknown Player"),
         key="attendance_list_ids"
     )
     
-    if attendees_ids:
-        st.success(f"📋 {len(attendees_ids)} players checked in. Go to 'Draft Board' to arrange squads!")
-    else:
-        st.info("Check boxes next to names above to build your active game-day group.")
+    # Process check-ins or check-outs against the live database
+    if st.button("Save & Sync Checked-In Lineup"):
+        # Find players added
+        for p_id in selected_attendees:
+            if p_id not in attendees_ids:
+                supabase.table("active_draft").insert({"player_id": p_id, "team_assigned": "Unassigned"}).execute()
+        # Find players removed
+        for p_id in attendees_ids:
+            if p_id not in selected_attendees:
+                supabase.table("active_draft").delete().eq("player_id", p_id).execute()
+        st.success("Attendance ledger updated in cloud!")
+        st.rerun()
 
 # ==========================================
-# TAB 2: DRAFT BOARD (MANUAL, AUTO & SCORING)
+# TAB 2: LIVE CO-EDIT DRAFT BOARD
 # ==========================================
 with tab_draft:
     st.header("Team Assignments")
@@ -114,29 +124,14 @@ with tab_draft:
     if not attendees_ids:
         st.warning("Please check in players on the '📋 Lineup' tab first!")
     else:
+        # Global sync button allowing leaders to grab changes made by the other device
+        if st.button("🔄 Sync Board (Pull Partner's Live Edits)"):
+            st.rerun()
+            
         num_teams = st.slider("Number of Teams", 2, 4, 2)
         team_options = ["Unassigned"] + [f"Team {i+1}" for i in range(num_teams)]
         
-        with st.expander(f"🔍 View Playmaking Stats ({len(attendees_ids)} Selected)"):
-            present_df = df[df['id'].isin(attendees_ids)].copy()
-            
-            # Override 'Nickname' column display visually with the new Full Names
-            present_df['Display Name'] = present_df['id'].map(player_map)
-            
-            playmaking_cols = [
-                'Display Name', 'Pairing', 'Type', 'Throw', 'Both Throws', 
-                'Consistent Catch', 'Endurance', 'Fast', 'College', 'Club', 'Developing', 'Notes'
-            ]
-            actual_playmaking = [c for c in playmaking_cols if c in present_df.columns]
-            
-            st.dataframe(
-                present_df[actual_playmaking].sort_values(by="Display Name"), 
-                hide_index=True, use_container_width=True
-            )
-            
-        st.divider()
-
-        # AUTOMATED SNAKE DRAFT
+        # AUTOMATED SNAKE DRAFT (Pushes directly to Cloud)
         st.subheader("🎲 Balanced Auto-Draft")
         if st.button("Run Balanced Auto-Draft"):
             present_players = df[df['id'].isin(attendees_ids)].copy()
@@ -149,9 +144,8 @@ with tab_draft:
                 p_id = row['id']
                 team_assigned = f"Team {current_team_idx + 1}"
                 
-                # Update both the internal assignment dictionary AND the UI selectbox widget state
-                st.session_state.assignments[p_id] = team_assigned
-                st.session_state[f"sel_{p_id}"] = team_assigned
+                # Update database directly
+                supabase.table("active_draft").update({"team_assigned": team_assigned}).eq("player_id", p_id).execute()
                 
                 current_team_idx += direction
                 if current_team_idx == num_teams:
@@ -160,34 +154,17 @@ with tab_draft:
                 elif current_team_idx == -1:
                     direction = 1
                     current_team_idx = 0
-            st.success("Auto-Draft complete!")
+            st.success("Auto-Draft committed to Cloud! Refreshing screens...")
             st.rerun()
 
         st.divider()
         
-        # Clean up stale assignments
-        for p_id in list(st.session_state.assignments.keys()):
-            if p_id not in attendees_ids:
-                del st.session_state.assignments[p_id]
-                
-        # SORTING SELECTION INTERFACE
+        # MANUAL ADJUSTMENT LIST (Updates Database on every change)
         st.subheader("Assign & Adjust Players")
-        sort_option = st.selectbox(
-            "Sort list by:", 
-            options=["Name", "Pairing (Best to Worst)", "Position Type"]
-        )
         
         active_players_df = df[df['id'].isin(attendees_ids)].copy()
-        
-        # Add the mapped display name for sorting purposes
         active_players_df['Display Name'] = active_players_df['id'].map(player_map)
-        
-        if sort_option == "Name":
-            active_players_df = active_players_df.sort_values(by="Display Name")
-        elif sort_option == "Pairing (Best to Worst)":
-            active_players_df = active_players_df.sort_values(by="Pairing", ascending=True, na_position='last')
-        elif sort_option == "Position Type":
-            active_players_df = active_players_df.sort_values(by=["Type", "Display Name"])
+        active_players_df = active_players_df.sort_values(by="Display Name")
         
         for _, row in active_players_df.iterrows():
             p_id = row['id']
@@ -195,8 +172,9 @@ with tab_draft:
             p_num = int(row['Pairing']) if pd.notna(row['Pairing']) else "N/A"
             p_type = row['Type'] if pd.notna(row['Type']) else "Cutter"
             
-            # Fetch the state directly
-            current_assignment = st.session_state.assignments.get(p_id, "Unassigned")
+            # Find current assignment from our cloud DataFrame
+            cloud_row = active_draft_df[active_draft_df['player_id'] == p_id]
+            current_assignment = cloud_row['team_assigned'].values[0] if not cloud_row.empty else "Unassigned"
             idx = team_options.index(current_assignment) if current_assignment in team_options else 0
             
             col_lbl, col_sel = st.columns([3, 2])
@@ -206,43 +184,32 @@ with tab_draft:
                 choice = st.selectbox(
                     "Assign", options=team_options, index=idx, key=f"sel_{p_id}", label_visibility="collapsed"
                 )
-                st.session_state.assignments[p_id] = choice
+                # If leader changes choice, update cloud immediately
+                if choice != current_assignment:
+                    supabase.table("active_draft").update({"team_assigned": choice}).eq("player_id", p_id).execute()
+                    st.rerun()
                 
         st.divider()
         
-        # ==========================================
-        # LIVE STANDINGS MODULE (With Manual Visual Sorting)
-        # ==========================================
+        # LIVE STANDINGS MODULE (Synced Order)
         st.subheader("Live Standings & Team Balances")
         team_cols = st.columns(num_teams)
         
         for i in range(num_teams):
             t_name = f"Team {i+1}"
+            team_data = active_draft_df[active_draft_df['team_assigned'] == t_name].copy()
             
-            # Get everyone currently assigned to this team
-            current_assigned_ids = [p_id for p_id, t in st.session_state.assignments.items() if t == t_name]
+            # Sort primarily by pairing first, then by manual order value
+            team_data['pairing_val'] = team_data['player_id'].apply(get_pairing)
+            team_data = team_data.sort_values(by=["display_order", "pairing_val"])
             
-            # Retrieve the last known display order for this team
-            saved_order = st.session_state.team_orders.get(t_name, [])
-            
-            # Filter out players who were removed from this team
-            final_order = [pid for pid in saved_order if pid in current_assigned_ids]
-            
-            # Identify newly assigned players and add them to the list (sorted by pairing)
-            missing_ids = [pid for pid in current_assigned_ids if pid not in final_order]
-            missing_ids_sorted = sorted(missing_ids, key=get_pairing)
-            final_order.extend(missing_ids_sorted)
-            
-            # Save the reconciled order back to session state
-            st.session_state.team_orders[t_name] = final_order
+            final_order = team_data['player_id'].tolist()
             
             with team_cols[i]:
-                # Calculate team score (Defaulting missing pairings to 15)
                 t_score = sum([get_pairing(pid) if get_pairing(pid) != 99 else 15 for pid in final_order])
                 st.markdown(f"### {t_name}")
                 st.metric(label="Pairing Score", value=t_score)
                 
-                # Render the players with nudging arrows
                 for idx, p_id in enumerate(final_order):
                     p_disp = player_map.get(p_id, "Unknown")
                     p_val = get_pairing(p_id)
@@ -253,21 +220,23 @@ with tab_draft:
                     
                     if c2.button("🔼", key=f"up_{t_name}_{p_id}"):
                         if idx > 0:
-                            # Swap with the player above
-                            final_order[idx], final_order[idx-1] = final_order[idx-1], final_order[idx]
-                            st.session_state.team_orders[t_name] = final_order
+                            # Swap database ordering indices
+                            above_p_id = final_order[idx-1]
+                            supabase.table("active_draft").update({"display_order": idx}).eq("player_id", above_p_id).execute()
+                            supabase.table("active_draft").update({"display_order": idx-1}).eq("player_id", p_id).execute()
                             st.rerun()
                             
                     if c3.button("🔽", key=f"dn_{t_name}_{p_id}"):
                         if idx < len(final_order) - 1:
-                            # Swap with the player below
-                            final_order[idx], final_order[idx+1] = final_order[idx+1], final_order[idx]
-                            st.session_state.team_orders[t_name] = final_order
+                            # Swap database ordering indices
+                            below_p_id = final_order[idx+1]
+                            supabase.table("active_draft").update({"display_order": idx}).eq("player_id", below_p_id).execute()
+                            supabase.table("active_draft").update({"display_order": idx+1}).eq("player_id", p_id).execute()
                             st.rerun()
 
         st.divider()
 
-        # FINAL SCORE & HISTORY SAVING
+        # FINAL LOGGING (Clears out the active staging room on completion)
         st.subheader("🏁 Log Match Results")
         with st.form("save_game_form"):
             custom_game_date = st.date_input("Match Date", datetime.date.today())
@@ -295,19 +264,23 @@ with tab_draft:
                     inserted_game_id = game_response.data[0]['id']
                     
                     roster_batch = []
-                    for p_id, assigned_team in st.session_state.assignments.items():
-                        if assigned_team != "Unassigned":
+                    for _, r in active_draft_df.iterrows():
+                        if r['team_assigned'] != "Unassigned":
                             roster_batch.append({
                                 "game_id": inserted_game_id,
-                                "player_id": p_id,
-                                "team_assigned": assigned_team
+                                "player_id": r['player_id'],
+                                "team_assigned": r['team_assigned']
                             })
                     
                     if roster_batch:
                         supabase.table("game_rosters").insert(roster_batch).execute()
                         
-                    st.success("🎉 Match logged and historic roster archived successfully!")
+                    # Wipe the staging table clean so next week starts fresh
+                    supabase.table("active_draft").delete().neq("team_assigned", "FORCE_DELETE_ALL").execute()
+                    
+                    st.success("🎉 Match logged! Active board wiped for next game.")
                     st.balloons()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Database error writing records: {e}")
 
@@ -316,7 +289,6 @@ with tab_draft:
 # ==========================================
 with tab_history:
     st.header("Historic Game Logs")
-    
     try:
         games_fetch = supabase.table("games").select("*").order("game_date", desc=True).execute()
         historical_games = games_fetch.data
@@ -350,11 +322,10 @@ with tab_history:
         st.error(f"Failed to load match ledger: {e}")
 
 # ==========================================
-# TAB 4: ROSTER OVERVIEW & CALCULATED YEARS
+# TAB 4: ROSTER OVERVIEW
 # ==========================================
 with tab_roster:
     st.header("Complete BAU League Roster")
-    
     if df.empty:
         st.info("No records found.")
     else:
@@ -362,7 +333,6 @@ with tab_roster:
         if 'id' in df_display.columns:
             df_display = df_display.drop(columns=['id'])
             
-        # Swap Nickname column for the Full Display Name mapping 
         df_display['Display Name'] = df['id'].map(player_map)
             
         if 'Date Joined' in df_display.columns:
@@ -373,11 +343,9 @@ with tab_roster:
                 lambda x: round((today_date - x.date()).days / 365.25, 1) if pd.notna(x) else 0.0
             )
             
-            # Shuffle columns for clean presentation
             cols = list(df_display.columns)
             cols.insert(0, cols.pop(cols.index('Display Name')))
             cols.insert(1, cols.pop(cols.index('Years in BAU')))
-            # Remove isolated first/last/nickname fields for an uncluttered read
             if 'First Name' in cols: cols.remove('First Name')
             if 'Last Name' in cols: cols.remove('Last Name')
             if 'Nickname' in cols: cols.remove('Nickname')
@@ -431,7 +399,6 @@ with tab_add:
             
             try:
                 supabase.table("players").insert(payload).execute()
-                # Friendly display for success message
                 saved_name = f"{new_first} {new_last}".strip() if new_first else new_nick
                 st.success(f"Added {saved_name}!")
                 st.cache_data.clear()
