@@ -40,7 +40,6 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-# We clear cache on load to ensure multi-device synchronization
 def load_data():
     response = supabase.table("players").select("*").execute()
     return pd.DataFrame(response.data)
@@ -93,7 +92,6 @@ with tab_lineup:
     
     sorted_ids = sorted(list(player_map.keys()), key=lambda x: player_map[x]) if player_map else []
     
-    # Pre-populate selections based on what's currently sitting in the cloud database
     selected_attendees = st.multiselect(
         "Check-in Players", 
         options=sorted_ids, 
@@ -102,13 +100,10 @@ with tab_lineup:
         key="attendance_list_ids"
     )
     
-    # Process check-ins or check-outs against the live database
     if st.button("Save & Sync Checked-In Lineup"):
-        # Find players added
         for p_id in selected_attendees:
             if p_id not in attendees_ids:
                 supabase.table("active_draft").insert({"player_id": p_id, "team_assigned": "Unassigned"}).execute()
-        # Find players removed
         for p_id in attendees_ids:
             if p_id not in selected_attendees:
                 supabase.table("active_draft").delete().eq("player_id", p_id).execute()
@@ -124,14 +119,12 @@ with tab_draft:
     if not attendees_ids:
         st.warning("Please check in players on the '📋 Lineup' tab first!")
     else:
-        # Global sync button allowing leaders to grab changes made by the other device
         if st.button("🔄 Sync Board (Pull Partner's Live Edits)"):
             st.rerun()
             
         num_teams = st.slider("Number of Teams", 2, 4, 2)
         team_options = ["Unassigned"] + [f"Team {i+1}" for i in range(num_teams)]
         
-        # AUTOMATED SNAKE DRAFT (Pushes directly to Cloud)
         st.subheader("🎲 Balanced Auto-Draft")
         if st.button("Run Balanced Auto-Draft"):
             present_players = df[df['id'].isin(attendees_ids)].copy()
@@ -144,7 +137,6 @@ with tab_draft:
                 p_id = row['id']
                 team_assigned = f"Team {current_team_idx + 1}"
                 
-                # Update database directly
                 supabase.table("active_draft").update({"team_assigned": team_assigned}).eq("player_id", p_id).execute()
                 
                 current_team_idx += direction
@@ -159,9 +151,7 @@ with tab_draft:
 
         st.divider()
         
-        # MANUAL ADJUSTMENT LIST (Updates Database on every change)
         st.subheader("Assign & Adjust Players")
-        
         active_players_df = df[df['id'].isin(attendees_ids)].copy()
         active_players_df['Display Name'] = active_players_df['id'].map(player_map)
         active_players_df = active_players_df.sort_values(by="Display Name")
@@ -172,7 +162,6 @@ with tab_draft:
             p_num = int(row['Pairing']) if pd.notna(row['Pairing']) else "N/A"
             p_type = row['Type'] if pd.notna(row['Type']) else "Cutter"
             
-            # Find current assignment from our cloud DataFrame
             cloud_row = active_draft_df[active_draft_df['player_id'] == p_id]
             current_assignment = cloud_row['team_assigned'].values[0] if not cloud_row.empty else "Unassigned"
             idx = team_options.index(current_assignment) if current_assignment in team_options else 0
@@ -184,14 +173,12 @@ with tab_draft:
                 choice = st.selectbox(
                     "Assign", options=team_options, index=idx, key=f"sel_{p_id}", label_visibility="collapsed"
                 )
-                # If leader changes choice, update cloud immediately
                 if choice != current_assignment:
                     supabase.table("active_draft").update({"team_assigned": choice}).eq("player_id", p_id).execute()
                     st.rerun()
                 
         st.divider()
         
-        # LIVE STANDINGS MODULE (Synced Order)
         st.subheader("Live Standings & Team Balances")
         team_cols = st.columns(num_teams)
         
@@ -199,7 +186,6 @@ with tab_draft:
             t_name = f"Team {i+1}"
             team_data = active_draft_df[active_draft_df['team_assigned'] == t_name].copy()
             
-            # Sort primarily by pairing first, then by manual order value
             team_data['pairing_val'] = team_data['player_id'].apply(get_pairing)
             team_data = team_data.sort_values(by=["display_order", "pairing_val"])
             
@@ -220,7 +206,6 @@ with tab_draft:
                     
                     if c2.button("🔼", key=f"up_{t_name}_{p_id}"):
                         if idx > 0:
-                            # Swap database ordering indices
                             above_p_id = final_order[idx-1]
                             supabase.table("active_draft").update({"display_order": idx}).eq("player_id", above_p_id).execute()
                             supabase.table("active_draft").update({"display_order": idx-1}).eq("player_id", p_id).execute()
@@ -228,7 +213,6 @@ with tab_draft:
                             
                     if c3.button("🔽", key=f"dn_{t_name}_{p_id}"):
                         if idx < len(final_order) - 1:
-                            # Swap database ordering indices
                             below_p_id = final_order[idx+1]
                             supabase.table("active_draft").update({"display_order": idx}).eq("player_id", below_p_id).execute()
                             supabase.table("active_draft").update({"display_order": idx+1}).eq("player_id", p_id).execute()
@@ -236,7 +220,6 @@ with tab_draft:
 
         st.divider()
 
-        # FINAL LOGGING (Clears out the active staging room on completion)
         st.subheader("🏁 Log Match Results")
         with st.form("save_game_form"):
             custom_game_date = st.date_input("Match Date", datetime.date.today())
@@ -275,7 +258,6 @@ with tab_draft:
                     if roster_batch:
                         supabase.table("game_rosters").insert(roster_batch).execute()
                         
-                    # Wipe the staging table clean so next week starts fresh
                     supabase.table("active_draft").delete().neq("team_assigned", "FORCE_DELETE_ALL").execute()
                     
                     st.success("🎉 Match logged! Active board wiped for next game.")
@@ -322,7 +304,7 @@ with tab_history:
         st.error(f"Failed to load match ledger: {e}")
 
 # ==========================================
-# TAB 4: ROSTER OVERVIEW
+# TAB 4: ROSTER OVERVIEW & DISCOVERY CALCULATOR
 # ==========================================
 with tab_roster:
     st.header("Complete BAU League Roster")
@@ -330,22 +312,52 @@ with tab_roster:
         st.info("No records found.")
     else:
         df_display = df.copy()
-        if 'id' in df_display.columns:
-            df_display = df_display.drop(columns=['id'])
+        current_year = datetime.date.today().year
+        
+        # Pull history aggregates seamlessly directly from relational mapping tables
+        try:
+            g_resp = supabase.table("games").select("id", "game_date").execute()
+            gr_resp = supabase.table("game_rosters").select("game_id", "player_id").execute()
+            games_df = pd.DataFrame(g_resp.data)
+            rosters_df = pd.DataFrame(gr_resp.data)
             
+            if not games_df.empty and not rosters_df.empty:
+                history_merged = rosters_df.merge(games_df, left_on="game_id", right_on="id")
+                history_merged['game_date'] = pd.to_datetime(history_merged['game_date'], errors='coerce')
+                
+                lifetime_games = history_merged.groupby('player_id').size().to_dict()
+                lifetime_days = history_merged.groupby('player_id')['game_date'].nunique().to_dict()
+                
+                current_year_df = history_merged[history_merged['game_date'].dt.year == current_year]
+                current_year_days = current_year_df.groupby('player_id')['game_date'].nunique().to_dict()
+            else:
+                lifetime_games, lifetime_days, current_year_days = {}, {}, {}
+        except Exception as e:
+            lifetime_games, lifetime_days, current_year_days = {}, {}, {}
+        
+        # Generate the new columns using safe mapping logic
+        df_display[f'Days Played ({current_year})'] = df_display['id'].map(current_year_days).fillna(0).astype(int)
+        df_display['Days Played (Lifetime)'] = df_display['id'].map(lifetime_days).fillna(0).astype(int)
+        df_display['Games Played (Lifetime)'] = df_display['id'].map(lifetime_games).fillna(0).astype(int)
+        
         df_display['Display Name'] = df['id'].map(player_map)
             
         if 'Date Joined' in df_display.columns:
             converted_dates = pd.to_datetime(df_display['Date Joined'], errors='coerce')
             today_date = datetime.date.today()
-            
             df_display['Years in BAU'] = converted_dates.apply(
                 lambda x: round((today_date - x.date()).days / 365.25, 1) if pd.notna(x) else 0.0
             )
             
+            # Reorganize column structural presentation layouts
             cols = list(df_display.columns)
             cols.insert(0, cols.pop(cols.index('Display Name')))
             cols.insert(1, cols.pop(cols.index('Years in BAU')))
+            cols.insert(2, cols.pop(cols.index(f'Days Played ({current_year})')))
+            cols.insert(3, cols.pop(cols.index('Days Played (Lifetime)')))
+            cols.insert(4, cols.pop(cols.index('Games Played (Lifetime)')))
+            
+            if 'id' in cols: cols.remove('id')
             if 'First Name' in cols: cols.remove('First Name')
             if 'Last Name' in cols: cols.remove('Last Name')
             if 'Nickname' in cols: cols.remove('Nickname')
