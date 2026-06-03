@@ -346,16 +346,17 @@ with tab_roster:
             converted_dates = pd.to_datetime(df_display['Date Joined'], errors='coerce')
             today_date = datetime.date.today()
             df_display['Years in BAU'] = converted_dates.apply(
-                lambda x: round((today_date - x.date()).days / 365.25, 1) if pd.notna(x) else 0.0
+                lambda x: round((today_date - x.date()).days / 365.25, 0) if pd.notna(x) else 0.0
             )
             
             # Reorganize column structural presentation layouts
             cols = list(df_display.columns)
             cols.insert(0, cols.pop(cols.index('Display Name')))
-            cols.insert(1, cols.pop(cols.index('Years in BAU')))
-            cols.insert(2, cols.pop(cols.index(f'Days Played ({current_year})')))
-            cols.insert(3, cols.pop(cols.index('Days Played (Lifetime)')))
-            cols.insert(4, cols.pop(cols.index('Games Played (Lifetime)')))
+
+            # Move stats to the end (after Notes)
+            for stat_col in ['Years in BAU', f'Days Played ({current_year})', 'Days Played (Lifetime)', 'Games Played (Lifetime)']:
+                if stat_col in cols:
+                    cols.append(cols.pop(cols.index(stat_col)))
             
             if 'id' in cols: cols.remove('id')
             if 'First Name' in cols: cols.remove('First Name')
