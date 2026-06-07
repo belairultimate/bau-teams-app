@@ -108,27 +108,6 @@ active_draft_df = get_cloud_draft()
 attendees_ids = active_draft_df['player_id'].tolist() if not active_draft_df.empty else []
 
 
-# ==========================================
-# MOBILE LAYOUT CSS OPTIMIZATION
-# ==========================================
-st.markdown("""
-<style>
-/* Prevent Streamlit from vertically stacking columns on small mobile screens */
-@media (max-width: 640px) {
-    div[data-testid="stHorizontalBlock"] {
-        flex-wrap: nowrap !important;
-        overflow-x: auto !important;
-        -webkit-overflow-scrolling: touch;
-    }
-    div[data-testid="column"] {
-        min-width: 140px !important;
-        flex: 1 1 0% !important;
-    }
-}
-</style>
-""", unsafe_allow_html=True)
-
-
 st.title("🥏 BAU Management Hub")
 
 tab_lineup, tab_draft, tab_history, tab_roster, tab_add, tab_edit = st.tabs([
@@ -221,7 +200,7 @@ with tab_draft:
         
         if sort_option == "Name":
             active_players_df = active_players_df.sort_values(by="Display Name")
-        elif sort_option == "Pairing (Best to Worst)":
+        elif sort_option == "Pairing":
             active_players_df = active_players_df.sort_values(by="Pairing", ascending=True, na_position='last')
         elif sort_option == "Position Type":
             active_players_df = active_players_df.sort_values(by=["Type", "Display Name"])
