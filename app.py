@@ -156,6 +156,10 @@ with tab_draft:
         st.warning("Please check in players on the '📋 Lineup' tab first!")
     else:
         if st.button("🔄 Sync Board (Pull Partner's Live Edits)"):
+            # Forcibly wipe local dropdown memory so it reads the freshest database data
+            for key in list(st.session_state.keys()):
+                if key.startswith("sel_"):
+                    del st.session_state[key]
             st.rerun()
             
         num_teams = st.slider("Number of Teams", 2, 4, 2)
@@ -173,7 +177,11 @@ with tab_draft:
                 p_id = row['id']
                 team_assigned = f"Team {current_team_idx + 1}"
                 
+                # Push the assignment to the cloud
                 supabase.table("active_draft").update({"team_assigned": team_assigned}).eq("player_id", p_id).execute()
+                
+                # Force the local dropdown memory to match the new team so you don't have to refresh
+                st.session_state[f"sel_{p_id}"] = team_assigned
                 
                 current_team_idx += direction
                 if current_team_idx == num_teams:
@@ -182,6 +190,7 @@ with tab_draft:
                 elif current_team_idx == -1:
                     direction = 1
                     current_team_idx = 0
+                    
             st.success("Auto-Draft committed to Cloud! Refreshing screens...")
             st.rerun()
 
@@ -270,7 +279,8 @@ with tab_draft:
         st.divider()
 
         st.subheader("🏁 Log Match Results")
-        with st.form("save_game_form"):
+        # Added clear_on_submit=True so inputs instantly drop back to zero on submit
+        with st.form("save_game_form", clear_on_submit=True):
             custom_game_date = st.date_input("Match Date", datetime.date.today())
             
             score_inputs = {}
@@ -307,10 +317,10 @@ with tab_draft:
                     if roster_batch:
                         supabase.table("game_rosters").insert(roster_batch).execute()
                         
-                    st.success("🎉 Match logged successfully!")
+                    st.success("🎉 Match logged successfully! The scores have been reset.")
                     st.balloons()
                     st.cache_data.clear()
-                    st.rerun()
+                    # Removed st.rerun() from here so the balloons & message actually stay on the screen!
                 except Exception as e:
                     st.error(f"Database error writing records: {e}")
                     
@@ -320,6 +330,10 @@ with tab_draft:
         if st.button("Wipe Active Board for Next Game"):
             try:
                 supabase.table("active_draft").delete().neq("team_assigned", "FORCE_DELETE_ALL").execute()
+                # Also wipe the local widget memory so dropdowns return to default unassigned blank states
+                for key in list(st.session_state.keys()):
+                    if key.startswith("sel_"):
+                        del st.session_state[key]
                 st.success("Active board cleared!")
                 st.rerun()
             except Exception as e:
