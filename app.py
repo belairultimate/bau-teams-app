@@ -192,7 +192,7 @@ with tab_draft:
         # Restored Sorting Capability
         sort_option = st.selectbox(
             "Sort list by:", 
-            options=["Name", "Pairing (Best to Worst)", "Position Type"]
+            options=["Name", "Pairing Value", "Position Type"]
         )
         
         active_players_df = df[df['id'].isin(attendees_ids)].copy()
@@ -200,7 +200,7 @@ with tab_draft:
         
         if sort_option == "Name":
             active_players_df = active_players_df.sort_values(by="Display Name")
-        elif sort_option == "Pairing":
+        elif sort_option == "Pairing Value":
             active_players_df = active_players_df.sort_values(by="Pairing", ascending=True, na_position='last')
         elif sort_option == "Position Type":
             active_players_df = active_players_df.sort_values(by=["Type", "Display Name"])
@@ -307,14 +307,23 @@ with tab_draft:
                     if roster_batch:
                         supabase.table("game_rosters").insert(roster_batch).execute()
                         
-                    supabase.table("active_draft").delete().neq("team_assigned", "FORCE_DELETE_ALL").execute()
-                    
-                    st.success("🎉 Match logged! Active board wiped for next game.")
+                    st.success("🎉 Match logged successfully!")
                     st.balloons()
                     st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Database error writing records: {e}")
+                    
+        st.divider()
+        st.subheader("🧹 Clear Draft Board")
+        st.write("When the day is over, click below to wipe the active assignments and check-ins.")
+        if st.button("Wipe Active Board for Next Game"):
+            try:
+                supabase.table("active_draft").delete().neq("team_assigned", "FORCE_DELETE_ALL").execute()
+                st.success("Active board cleared!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error clearing board: {e}")
 
 # ==========================================
 # GAME HISTORY TAB
@@ -375,176 +384,4 @@ with tab_roster:
         df_display['Days Played (Lifetime)'] = df_display['id'].map(lifetime_days).fillna(0).astype(int)
         df_display['Games Played (Lifetime)'] = df_display['id'].map(lifetime_games).fillna(0).astype(int)
         
-        df_display['Display Name'] = df['id'].map(player_map)
-            
-        if 'Date Joined' in df_display.columns:
-            converted_dates = pd.to_datetime(df_display['Date Joined'], errors='coerce')
-            today_date = datetime.date.today()
-            df_display['Years in BAU'] = converted_dates.apply(
-                lambda x: round((today_date - x.date()).days / 365.25, 0) if pd.notna(x) else 0.0
-            )
-            
-            # Reorganize column structural presentation layouts
-            cols = list(df_display.columns)
-            cols.insert(0, cols.pop(cols.index('Display Name')))
-
-            # Move stats to the end (after Notes)
-            for stat_col in ['Years in BAU', f'Days Played ({current_year})', 'Days Played (Lifetime)', 'Games Played (Lifetime)']:
-                if stat_col in cols:
-                    cols.append(cols.pop(cols.index(stat_col)))
-            
-            if 'id' in cols: cols.remove('id')
-            if 'First Name' in cols: cols.remove('First Name')
-            if 'Last Name' in cols: cols.remove('Last Name')
-            if 'Nickname' in cols: cols.remove('Nickname')
-            
-            df_display = df_display[cols]
-            
-        st.dataframe(df_display.sort_values(by="Display Name"), hide_index=True, use_container_width=True)
-
-# ==========================================
-# TAB 5: ADD A NEW PLAYER
-# ==========================================
-with tab_add:
-    st.header("Add Player to Database")
-    with st.form("add_player_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1: new_first = st.text_input("First Name").strip()
-        with col2: new_last = st.text_input("Last Name").strip()
-        new_nick = st.text_input("Nickname (Optional)").strip()
-        
-        col3, col4 = st.columns(2)
-        with col3: new_pairing = st.number_input("Pairing (1-30)", min_value=0, max_value=30, value=0)
-        with col4: new_type = st.selectbox("Position", ["Cutter", "Handler", "Hybrid"])
-        
-        new_throw_range = st.selectbox("Throw Range", ["Short", "Medium", "Long"])
-        
-        st.write("**Player Traits:**")
-        c1, c2 = st.columns(2)
-        with c1:
-            feat_both = st.checkbox("Both Throws")
-            feat_coll = st.checkbox("Played College")
-            feat_club = st.checkbox("Played Club")
-        with c2:
-            feat_catch = st.checkbox("Consistent Catch")
-            feat_dev = st.checkbox("Developing Player")
-            feat_fast = st.checkbox("Fast / Speed")
-            
-        new_notes = st.text_area("Notes")
-        submitted = st.form_submit_button("Save Player")
-        
-        if submitted:
-            payload = {
-                "Nickname": new_nick if new_nick else None, 
-                "First Name": new_first, 
-                "Last Name": new_last,
-                "Pairing": new_pairing, "Type": new_type, "Both Throws": feat_both,
-                "College": feat_coll, "Club": feat_club, "Consistent Catch": feat_catch,
-                "Developing": feat_dev, "Fast": feat_fast, "Throw": new_throw_range,
-                "Notes": new_notes, "Date Joined": datetime.date.today().strftime('%m/%d/%Y'),
-                "Status": "Regular"
-            }
-            
-            try:
-                supabase.table("players").insert(payload).execute()
-                saved_name = f"{new_first} {new_last}".strip() if new_first else new_nick
-                st.success(f"Added {saved_name}!")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-# ==========================================
-# TAB 6: EDIT EXISTING PLAYER
-# ==========================================
-with tab_edit:
-    st.header("✏️ Edit Player Database")
-    
-    if df.empty:
-        st.info("No players available to edit.")
-    else:
-        # Safely sort the player options for the dropdown
-        edit_sorted_ids = sorted(list(player_map.keys()), key=lambda x: player_map[x])
-        
-        # Player selector outside the form so it updates the default values dynamically
-        selected_edit_id = st.selectbox(
-            "Select Player to Edit", 
-            options=edit_sorted_ids, 
-            format_func=lambda x: player_map.get(x, "Unknown Player"),
-            key="edit_player_selector"
-        )
-        
-        # Extract the selected player's current data
-        current_data = df[df['id'] == selected_edit_id].iloc[0]
-        
-        # Helper functions to handle empty/NaN data safely for Streamlit inputs
-        def get_str(col): return str(current_data[col]).strip() if pd.notna(current_data.get(col)) else ""
-        def get_bool(col): return bool(current_data[col]) if pd.notna(current_data.get(col)) else False
-        def get_int(col): return int(current_data[col]) if pd.notna(current_data.get(col)) else 0
-        
-        with st.form("edit_player_form"):
-            col1, col2 = st.columns(2)
-            with col1: edit_first = st.text_input("First Name", value=get_str("First Name"))
-            with col2: edit_last = st.text_input("Last Name", value=get_str("Last Name"))
-            
-            col_nick, col_stat = st.columns(2)
-            with col_nick: edit_nick = st.text_input("Nickname", value=get_str("Nickname"))
-            with col_stat:
-                status_options = ["Regular", "Occasional", "Inactive"]
-                curr_status = get_str("Status")
-                stat_idx = status_options.index(curr_status) if curr_status in status_options else 0
-                edit_status = st.selectbox("Status", status_options, index=stat_idx)
-            
-            col3, col4 = st.columns(2)
-            with col3: edit_pairing = st.number_input("Pairing (1-30)", min_value=0, max_value=30, value=get_int("Pairing"))
-            with col4: 
-                pos_options = ["Cutter", "Handler", "Hybrid"]
-                curr_pos = get_str("Type")
-                pos_idx = pos_options.index(curr_pos) if curr_pos in pos_options else 0
-                edit_type = st.selectbox("Position", pos_options, index=pos_idx)
-            
-            throw_options = ["Short", "Medium", "Long"]
-            curr_throw = get_str("Throw")
-            throw_idx = throw_options.index(curr_throw) if curr_throw in throw_options else 0
-            edit_throw_range = st.selectbox("Throw Range", throw_options, index=throw_idx)
-            
-            st.write("**Player Traits:**")
-            c1, c2 = st.columns(2)
-            with c1:
-                edit_both = st.checkbox("Both Throws", value=get_bool("Both Throws"))
-                edit_coll = st.checkbox("Played College", value=get_bool("College"))
-                edit_club = st.checkbox("Played Club", value=get_bool("Club"))
-            with c2:
-                edit_catch = st.checkbox("Consistent Catch", value=get_bool("Consistent Catch"))
-                edit_dev = st.checkbox("Developing Player", value=get_bool("Developing"))
-                edit_fast = st.checkbox("Fast / Speed", value=get_bool("Fast"))
-                
-            edit_notes = st.text_area("Notes", value=get_str("Notes"))
-            
-            st.divider()
-            
-            # The safety confirmation
-            confirm_edit = st.checkbox("⚠️ I confirm I want to overwrite this player's data.")
-            submit_edit = st.form_submit_button("Submit Edits to Database")
-            
-            if submit_edit:
-                if not confirm_edit:
-                    st.error("❌ Please check the confirmation box before submitting.")
-                else:
-                    payload = {
-                        "Nickname": edit_nick if edit_nick else None, 
-                        "First Name": edit_first, 
-                        "Last Name": edit_last,
-                        "Pairing": edit_pairing, "Type": edit_type, "Both Throws": edit_both,
-                        "College": edit_coll, "Club": edit_club, "Consistent Catch": edit_catch,
-                        "Developing": edit_dev, "Fast": edit_fast, "Throw": edit_throw_range,
-                        "Notes": edit_notes, "Status": edit_status
-                    }
-                    
-                    try:
-                        supabase.table("players").update(payload).eq("id", selected_edit_id).execute()
-                        st.success(f"🎉 Successfully updated {player_map.get(selected_edit_id)}!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error updating database: {e}")
+        df_display['Display Name'] = df['id'].map(player
